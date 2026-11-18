@@ -19,25 +19,30 @@ def half_up(value):
     return (2 * value.numerator + value.denominator) // (2 * value.denominator)
 
 
+def parse_tariff_row(row):
+    """Validate one complete tariff and return ((service, zone), internal tariff)."""
+    require(row, TARIFF_FIELDS)
+    service, zone = ident(row['service']), ident(row['zone'])
+    return (service, zone), {
+        'base': number(row['base_cents'], 0, 10**12),
+        'step': number(row['step_grams'], 1, 10**9),
+        'rate': number(row['per_step_cents'], 0, 10**9),
+        'divisor': number(row['divisor_cm3_per_kg'], 1, 10**9),
+        'girth': number(row['max_girth_mm'], 1, 10**9),
+        'remote': number(row['remote_cents'], 0, 10**12),
+        'fuel': number(row['fuel_bp'], 0, 100000),
+        'insurance': number(row['insurance_bp'], 0, 100000),
+        'free': number(row['insurance_free_cents'], 0, 10**12),
+    }
+
+
 def _parse_tariffs(data):
     tariffs = {}
     for row in rows(data['tariffs'], 500):
-        require(row, TARIFF_FIELDS)
-        service, zone = ident(row['service']), ident(row['zone'])
-        key = (service, zone)
+        key, tariff = parse_tariff_row(row)
         if key in tariffs:
             raise ValueError('duplicate tariff')
-        tariffs[key] = {
-            'base': number(row['base_cents'], 0, 10**12),
-            'step': number(row['step_grams'], 1, 10**9),
-            'rate': number(row['per_step_cents'], 0, 10**9),
-            'divisor': number(row['divisor_cm3_per_kg'], 1, 10**9),
-            'girth': number(row['max_girth_mm'], 1, 10**9),
-            'remote': number(row['remote_cents'], 0, 10**12),
-            'fuel': number(row['fuel_bp'], 0, 100000),
-            'insurance': number(row['insurance_bp'], 0, 100000),
-            'free': number(row['insurance_free_cents'], 0, 10**12),
-        }
+        tariffs[key] = tariff
     return tariffs
 
 
@@ -322,6 +327,41 @@ def plan(data):
     return result
 
 
+def rate_parcel(parcel, tariff):
+    """Rate one parcel against one complete tariff using the exact v1 rules.
+
+    Returns ('oversize', {'girth_mm': girth}) or
+    ('rated', {all v1 rated evidence fields except id/service/zone}).
+    Shared by analyze() and the temporal frontier rating so the per-piece
+    formulas (girth, dimensional weight, step ceiling, remote, fuel and
+    half-up insurance) have a single implementation.
+    """
+    weight, length, width, height, declared, remote = parcel
+    girth = length + 2 * (width + height)
+    if girth > tariff['girth']:
+        return 'oversize', {'girth_mm': girth}
+    volume_cm3 = Fraction(length * width * height, 1_000)
+    dimensional_grams = volume_cm3 * 1000 / tariff['divisor']
+    chargeable = (ceil_fraction(max(Fraction(weight), dimensional_grams) / tariff['step'])
+                  * tariff['step'])
+    steps = chargeable // tariff['step']
+    base = tariff['base'] + steps * tariff['rate'] + (tariff['remote'] if remote else 0)
+    fuel = half_up(Fraction(base * tariff['fuel'], 10000))
+    insured_value = max(0, declared - tariff['free'])
+    insurance = half_up(Fraction(insured_value * tariff['insurance'], 10000))
+    return 'rated', {
+        'actual_weight_grams': weight,
+        'dimensional_weight_grams': str(dimensional_grams),
+        'chargeable_weight_grams': chargeable,
+        'weight_steps': steps,
+        'girth_mm': girth,
+        'base_cents': base,
+        'fuel_cents': fuel,
+        'insurance_cents': insurance,
+        'total_cents': base + fuel + insurance,
+    }
+
+
 def analyze(data):
     require(data, 'tariffs shipments')
     tariffs = _parse_tariffs(data)
@@ -336,24 +376,16 @@ def analyze(data):
         tariff = tariffs.get((ident(row['service']), ident(row['zone'])))
         if tariff is None:
             raise ValueError('no matching service-zone tariff')
-        parcel = _parse_parcel_common(row)
-        weight, length, width, height, declared, remote = parcel
-        girth = length + 2 * (width + height)
-        if girth > tariff['girth']:
-            shipments.append({'id': sid, 'status': 'oversize', 'girth_mm': girth})
-            continue
-        volume_cm3 = Fraction(length * width * height, 1_000)
-        dimensional_grams = volume_cm3 * 1000 / tariff['divisor']
-        chargeable = ceil_fraction(max(Fraction(weight), dimensional_grams) / tariff['step']) * tariff['step']
-        steps = chargeable // tariff['step']
-        base = tariff['base'] + steps * tariff['rate'] + (tariff['remote'] if remote else 0)
-        fuel = half_up(Fraction(base * tariff['fuel'], 10000))
-        insured_value = max(0, declared - tariff['free'])
-        insurance = half_up(Fraction(insured_value * tariff['insurance'], 10000))
-        shipments.append({'id': sid, 'status': 'rated', 'actual_weight_grams': weight,
-                          'dimensional_weight_grams': str(dimensional_grams), 'chargeable_weight_grams': chargeable,
-                          'weight_steps': steps, 'girth_mm': girth, 'base_cents': base,
-                          'fuel_cents': fuel, 'insurance_cents': insurance, 'total_cents': base + fuel + insurance})
+        status, detail = rate_parcel(_parse_parcel_common(row), tariff)
+        shipments.append({'id': sid, 'status': status, **detail})
     rated = [s for s in shipments if s['status'] == 'rated']
     return {'shipments': sorted(shipments, key=lambda s: s['id']), 'rated_count': len(rated),
             'oversize_count': len(shipments) - len(rated), 'total_cents': sum(s['total_cents'] for s in rated)}
+
+
+def temporal(data):
+    """Schema v3 authoritative revision timeline; implementation lives in
+    :mod:`parcel_rating.temporal`. Imported lazily to keep the module graph
+    acyclic (the temporal module reuses v1 rating helpers from this module)."""
+    from .temporal import temporal as _temporal
+    return _temporal(data)

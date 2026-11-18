@@ -1,0 +1,161 @@
+{
+  "revisions": [
+    {
+      "revision_id": "ground-A",
+      "known_seq": 1,
+      "start": 0,
+      "end": 120,
+      "tariff": {
+        "service": "ground",
+        "zone": "Z1",
+        "base_cents": 100,
+        "step_grams": 500,
+        "per_step_cents": 50,
+        "divisor_cm3_per_kg": 5000,
+        "max_girth_mm": 3000,
+        "remote_cents": 0,
+        "fuel_bp": 0,
+        "insurance_bp": 0,
+        "insurance_free_cents": 0
+      },
+      "supersedes": []
+    },
+    {
+      "revision_id": "ground-B",
+      "known_seq": 2,
+      "start": 30,
+      "end": 90,
+      "tariff": {
+        "service": "ground",
+        "zone": "Z1",
+        "base_cents": 100,
+        "step_grams": 500,
+        "per_step_cents": 50,
+        "divisor_cm3_per_kg": 5000,
+        "max_girth_mm": 900,
+        "remote_cents": 0,
+        "fuel_bp": 0,
+        "insurance_bp": 0,
+        "insurance_free_cents": 0
+      },
+      "supersedes": ["ground-A"]
+    },
+    {
+      "revision_id": "ground-C",
+      "known_seq": 3,
+      "start": 60,
+      "end": 75,
+      "tariff": {
+        "service": "ground",
+        "zone": "Z1",
+        "base_cents": 100,
+        "step_grams": 500,
+        "per_step_cents": 50,
+        "divisor_cm3_per_kg": 5000,
+        "max_girth_mm": 3000,
+        "remote_cents": 0,
+        "fuel_bp": 0,
+        "insurance_bp": 0,
+        "insurance_free_cents": 0
+      },
+      "supersedes": ["ground-A"]
+    },
+    {
+      "revision_id": "air-A",
+      "known_seq": 3,
+      "start": 0,
+      "end": 40,
+      "tariff": {
+        "service": "air",
+        "zone": "Z9",
+        "base_cents": 0,
+        "step_grams": 500,
+        "per_step_cents": 300,
+        "divisor_cm3_per_kg": 1000000000,
+        "max_girth_mm": 3000,
+        "remote_cents": 0,
+        "fuel_bp": 0,
+        "insurance_bp": 0,
+        "insurance_free_cents": 0
+      },
+      "supersedes": []
+    }
+  ],
+  "shipments": [
+    {
+      "id": "G-early",
+      "service": "ground",
+      "zone": "Z1",
+      "weight_grams": 500,
+      "length_mm": 100,
+      "width_mm": 100,
+      "height_mm": 100,
+      "declared_cents": 0,
+      "remote": false,
+      "shipped_at": 20
+    },
+    {
+      "id": "G-fork",
+      "service": "ground",
+      "zone": "Z1",
+      "weight_grams": 500,
+      "length_mm": 100,
+      "width_mm": 100,
+      "height_mm": 100,
+      "declared_cents": 0,
+      "remote": false,
+      "shipped_at": 65
+    },
+    {
+      "id": "G-oversize",
+      "service": "ground",
+      "zone": "Z1",
+      "weight_grams": 500,
+      "length_mm": 600,
+      "width_mm": 100,
+      "height_mm": 100,
+      "declared_cents": 0,
+      "remote": false,
+      "shipped_at": 50
+    },
+    {
+      "id": "G-late",
+      "service": "ground",
+      "zone": "Z1",
+      "weight_grams": 500,
+      "length_mm": 100,
+      "width_mm": 100,
+      "height_mm": 100,
+      "declared_cents": 0,
+      "remote": false,
+      "shipped_at": 100
+    },
+    {
+      "id": "A1",
+      "service": "air",
+      "zone": "Z9",
+      "weight_grams": 500,
+      "length_mm": 100,
+      "width_mm": 100,
+      "height_mm": 100,
+      "declared_cents": 0,
+      "remote": false,
+      "shipped_at": 20
+    },
+    {
+      "id": "A2",
+      "service": "air",
+      "zone": "Z9",
+      "weight_grams": 500,
+      "length_mm": 100,
+      "width_mm": 100,
+      "height_mm": 100,
+      "declared_cents": 0,
+      "remote": false,
+      "shipped_at": 80
+    }
+  ],
+  "as_of_seq": 4,
+  "window_start": 0,
+  "window_end": 120
+}

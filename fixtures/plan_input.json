@@ -1,0 +1,17 @@
+{
+  "tariffs": [
+    {"service": "ground", "zone": "Z1", "base_cents": 100, "step_grams": 500, "per_step_cents": 80, "divisor_cm3_per_kg": 5000, "max_girth_mm": 3000, "remote_cents": 120, "fuel_bp": 850, "insurance_bp": 100, "insurance_free_cents": 5000},
+    {"service": "express", "zone": "Z1", "base_cents": 250, "step_grams": 500, "per_step_cents": 160, "divisor_cm3_per_kg": 5000, "max_girth_mm": 2500, "remote_cents": 200, "fuel_bp": 1200, "insurance_bp": 150, "insurance_free_cents": 20000},
+    {"service": "ground", "zone": "Z2", "base_cents": 150, "step_grams": 500, "per_step_cents": 110, "divisor_cm3_per_kg": 6000, "max_girth_mm": 3000, "remote_cents": 180, "fuel_bp": 900, "insurance_bp": 120, "insurance_free_cents": 10000}
+  ],
+  "dispatch_rules": [
+    {"service": "ground", "zone": "Z1", "max_pieces": 8, "max_chargeable_grams": 20000, "minimum_base_cents": 500},
+    {"service": "express", "zone": "Z1", "max_pieces": 4, "max_chargeable_grams": 12000, "minimum_base_cents": 0},
+    {"service": "ground", "zone": "Z2", "max_pieces": 8, "max_chargeable_grams": 20000, "minimum_base_cents": 600}
+  ],
+  "shipments": [
+    {"id": "P-1", "services": ["ground", "express"], "zone": "Z1", "weight_grams": 900, "length_mm": 400, "width_mm": 300, "height_mm": 200, "declared_cents": 100000, "remote": true},
+    {"id": "P-2", "services": ["ground", "express"], "zone": "Z1", "weight_grams": 1200, "length_mm": 100, "width_mm": 100, "height_mm": 100, "declared_cents": 10000, "remote": false},
+    {"id": "P-3", "services": ["ground"], "zone": "Z2", "weight_grams": 600, "length_mm": 200, "width_mm": 150, "height_mm": 150, "declared_cents": 30000, "remote": true}
+  ]
+}

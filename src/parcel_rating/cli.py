@@ -2,20 +2,27 @@ DESCRIPTION='Dimensional-weight parcel rating with exact tariff and surcharge ev
 import argparse, json, sys
 from pathlib import Path
 from .common import read, save
-from .model import analyze
+from .model import analyze, plan
 
-def run(source):
+def run(source, planning):
     data,digest=read(source)
-    return {'schema_version':1,'source_sha256':digest,'result':analyze(data)}
+    if planning:
+        result=plan(data)
+        schema=2
+    else:
+        result=analyze(data)
+        schema=1
+    return {'schema_version':schema,'source_sha256':digest,'result':result}
 
 def main():
     parser=argparse.ArgumentParser(description=DESCRIPTION)
+    parser.add_argument('--plan',action='store_true',help='batch dispatch allocation mode (schema_version 2)')
     parser.add_argument('--source',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
     try:
         if args.source.resolve()==args.output.resolve():raise ValueError('input and output must differ')
-        report=run(args.source);save(args.output,report)
+        report=run(args.source,args.plan);save(args.output,report)
     except (ValueError,TypeError,KeyError,OSError,OverflowError,RecursionError) as error:
         print(str(error),file=sys.stderr);return 2
     print(json.dumps(report,sort_keys=True,ensure_ascii=False,allow_nan=False));return 0

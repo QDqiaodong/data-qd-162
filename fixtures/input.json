@@ -1,0 +1,9 @@
+{
+  "tariffs": [
+    {"service": "ground", "zone": "Z2", "base_cents": 250, "step_grams": 500, "per_step_cents": 40, "divisor_cm3_per_kg": 5000, "max_girth_mm": 3000, "remote_cents": 125, "fuel_bp": 850, "insurance_bp": 100, "insurance_free_cents": 50000}
+  ],
+  "shipments": [
+    {"id": "P-1", "service": "ground", "zone": "Z2", "weight_grams": 900, "length_mm": 400, "width_mm": 300, "height_mm": 200, "declared_cents": 100000, "remote": true},
+    {"id": "P-2", "service": "ground", "zone": "Z2", "weight_grams": 1200, "length_mm": 100, "width_mm": 100, "height_mm": 100, "declared_cents": 10000, "remote": false}
+  ]
+}

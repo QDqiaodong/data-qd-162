@@ -1,0 +1,20 @@
+{
+  "rating": {
+    "tariffs": [
+      {"service": "ground", "zone": "Z1", "base_cents": 0, "step_grams": 500, "per_step_cents": 100, "divisor_cm3_per_kg": 1000000000, "max_girth_mm": 1000, "remote_cents": 0, "fuel_bp": 0, "insurance_bp": 0, "insurance_free_cents": 0}
+    ],
+    "shipments": [
+      {"id": "A", "service": "ground", "zone": "Z1", "weight_grams": 500, "length_mm": 100, "width_mm": 100, "height_mm": 100, "declared_cents": 0, "remote": false},
+      {"id": "B", "service": "ground", "zone": "Z1", "weight_grams": 1000, "length_mm": 100, "width_mm": 100, "height_mm": 100, "declared_cents": 0, "remote": false},
+      {"id": "X", "service": "ground", "zone": "Z1", "weight_grams": 500, "length_mm": 1000, "width_mm": 300, "height_mm": 300, "declared_cents": 0, "remote": false}
+    ]
+  },
+  "debits": [
+    {"debit_id": "D1", "gross_cents": 250, "shipment_candidates": ["A", "B"]},
+    {"debit_id": "D2", "gross_cents": 150, "shipment_candidates": ["A", "B"]}
+  ],
+  "credits": [
+    {"credit_id": "C1", "cents": 50, "debit_candidates": ["D1", "D2"]},
+    {"credit_id": "C2", "cents": 50, "debit_candidates": ["D1"]}
+  ]
+}

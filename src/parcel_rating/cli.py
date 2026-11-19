@@ -2,11 +2,14 @@ DESCRIPTION='Dimensional-weight parcel rating with exact tariff and surcharge ev
 import argparse, json, sys
 from pathlib import Path
 from .common import read, save
-from .model import analyze, plan, temporal
+from .model import analyze, plan, temporal, reconcile
 
-def run(source, planning, temporal_mode):
+def run(source, planning, temporal_mode, reconcile_mode=False):
     data,digest=read(source)
-    if temporal_mode:
+    if reconcile_mode:
+        result=reconcile(data)
+        schema=4
+    elif temporal_mode:
         result=temporal(data)
         schema=3
     elif planning:
@@ -22,12 +25,14 @@ def main():
     mode=parser.add_mutually_exclusive_group()
     mode.add_argument('--plan',action='store_true',help='batch dispatch allocation mode (schema_version 2)')
     mode.add_argument('--temporal',action='store_true',help='authoritative revision timeline and point-in-time rating (schema_version 3)')
+    mode.add_argument('--reconcile',action='store_true',help='external bill closure reconciliation with identity support evidence (schema_version 4)')
     parser.add_argument('--source',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
+    report=None
     try:
         if args.source.resolve()==args.output.resolve():raise ValueError('input and output must differ')
-        report=run(args.source,args.plan,args.temporal);save(args.output,report)
+        report=run(args.source,args.plan,args.temporal,args.reconcile);save(args.output,report)
     except (ValueError,TypeError,KeyError,OSError,OverflowError,RecursionError) as error:
         print(str(error),file=sys.stderr);return 2
     print(json.dumps(report,sort_keys=True,ensure_ascii=False,allow_nan=False));return 0

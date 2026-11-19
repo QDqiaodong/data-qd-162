@@ -1,6 +1,6 @@
 # Dimensional parcel rating
 
-The package has three entry points sharing the same strict JSON reader, source
+The package has four entry points sharing the same strict JSON reader, source
 SHA256 provenance and atomic report publication:
 
 1. **Per-piece rating (schema_version 1)** — `analyze(data)` /
@@ -11,6 +11,12 @@ SHA256 provenance and atomic report publication:
    `parcel_rating.model.temporal(data)` /
    `parcel-rating --temporal --source FILE --output FILE`. Described in its
    own section below. `--temporal` and `--plan` are mutually exclusive.
+4. **External bill closure reconciliation (schema_version 4)** —
+   `reconcile(data)` / `parcel_rating.model.reconcile(data)` /
+   `parcel-rating --reconcile --source FILE --output FILE`. Described in its
+   own section below. `--reconcile` is pairwise mutually exclusive with
+   `--plan` and `--temporal`. The three older entry points keep their original
+   contracts exactly.
 
 ## v1 per-piece rating
 
@@ -297,3 +303,165 @@ enumeration and no per-shipment graph traversal.
 All outputs are canonically sorted, so reordering any input arrays (or the
 ids inside a `supersedes` array) leaves `result` unchanged while
 `source_sha256` still tracks the exact raw bytes of that invocation.
+
+## v4 external bill closure reconciliation
+
+This entry point only decides whether an external carrier bill (debits and
+credits) can be **completely reconciled** against the read-only payable
+baseline produced by the existing v1 per-piece rating. It never changes a
+service, a rate, a tariff or a shipment decision, and no external bill amount
+is ever injected into the rating input.
+
+### Input contract
+
+The top level contains exactly `rating`, `debits`, `credits` (no other field,
+none missing).
+
+- `rating` contains exactly `tariffs` and `shipments` and follows the v1
+  `analyze` contract in full: every field, identifier, duplicate-id and
+  duplicate-tariff rule, every numeric bound and every boolean check, plus the
+  v1 missing-tariff error, are reused unchanged. The only difference is that
+  the `shipments` array cap is narrowed from the v1 limit to twelve.
+- The payable baseline is the result of that single `analyze` run. A shipment
+  with `status: "rated"` is a payable identity whose amount is fixed at its
+  v1 `total_cents`; a rated shipment billed exactly zero is still a payable
+  identity and may never be omitted. A shipment with `status: "oversize"`
+  creates no payable; its id is reported separately as an excluded identity
+  and can never be used as a zero-cents payable or referenced by a debit
+  candidate.
+
+`debits` has at most twelve entries. Each entry has exactly `debit_id`,
+`gross_cents`, `shipment_candidates`:
+
+- `debit_id` follows the common identifier rules and is unique within the
+  debits array.
+- `gross_cents` is an integer in `0..10^15`; booleans, floats and strings are
+  rejected.
+- `shipment_candidates` is an array of distinct identifiers, at most twelve,
+  each referencing a `rated` shipment of this request. Referencing an unknown
+  id or an oversize id, a duplicate candidate, an over-cap array or a
+  non-array value makes the whole request invalid. An empty array is legal and
+  means the debit declares no possible shipment identity.
+
+`credits` has at most fourteen entries. Each entry has exactly `credit_id`,
+`cents`, `debit_candidates`:
+
+- `credit_id` follows the identifier rules and is unique within the credits
+  array. Debit ids and credit ids are independent namespaces; the same literal
+  may appear in both.
+- `cents` is an integer in `1..10^15` (a credit is never zero); booleans,
+  floats and strings are rejected.
+- `debit_candidates` is an array of distinct identifiers, at most two, each
+  referencing a declared debit. The same invalidity rules apply, and an empty
+  array is a legal declaration with no assignable target.
+
+Unknown or missing fields, duplicate ids, bad references, over-limit arrays
+and any v1 rating invalidity fail the whole request with CLI exit code 2 and
+never overwrite an existing report. A payable/debit count mismatch, unequal
+totals or the absence of a complete explanation are business non-closure, not
+format errors: the request is valid and exits 0.
+
+### Complete reconciliation explanation
+
+A complete explanation gives, jointly:
+
+- one debit target for every credit, chosen from its declared candidates,
+  with the whole credit used exactly once (no split, no omission, no reuse);
+  a debit may receive several credits, and the sum assigned to a debit must
+  never exceed its `gross_cents` (its net must not be negative);
+- one rated shipment target for every debit, chosen from its declared
+  candidates, forming a bijection: every debit is matched and every payable
+  shipment is covered exactly once;
+- the debit's net (`gross_cents` minus every credit assigned to it) must equal
+  the exact `total_cents` of the matched shipment. All equalities are exact
+  integer equations: no tolerance, no float comparison, no aggregate
+  top-up, no silently dropped row. A zero-net debit can only cover a
+  zero-cents rated shipment.
+
+Credit assignment changes every debit net and therefore which shipment match
+can close, while the unique-cover constraint can rule out a credit assignment
+even when each per-debit and per-credit edge is locally legal. The two choices
+are therefore judged together, and a single locally feasible edge is never
+reported as fact unless one joint complete explanation actually uses it.
+
+### Support evidence and status
+
+`parcel_rating.model.reconcile(data)` returns `result` directly and never
+mutates its argument; the CLI envelope is
+`{"schema_version": 4, "source_sha256": ..., "result": ...}`. `result` has
+exactly:
+
+- `expected_shipments`: the read-only payables sorted by id, each
+  `{id, expected_cents}`;
+- `excluded_oversize_ids`: sorted oversize shipment ids;
+- `expected_total_cents`: sum of every payable (always emitted);
+- `net_debit_cents`: sum of every `gross_cents` minus sum of every credit
+  `cents` (always emitted; aggregate integer arithmetic is not bounded by the
+  per-line ceiling);
+- `reconciled`: boolean, true iff at least one complete explanation exists;
+- `debit_support`: one row per source debit sorted by `debit_id`, each
+  exactly `{debit_id, status, shipment_ids}`;
+- `credit_support`: one row per source credit sorted by `credit_id`, each
+  exactly `{credit_id, status, debit_ids}`.
+
+When `reconciled` is true, `shipment_ids` (respectively `debit_ids`) is the
+full set of identities that the row is actually associated with in at least
+one complete explanation, sorted by Unicode code point with no duplicates. A
+set of size one has `status: "forced"`; a larger set has
+`status: "ambiguous"`. Equal money never merges distinct identities. The
+union of support across rows is not a witness by itself: choices from
+different explanations cannot be cross-combined into a joint explanation that
+does not exist, and an edge that is only locally feasible is never included.
+
+When `reconciled` is false, every support array is empty and every row's
+status is `"blocked"`. The payable list, excluded oversize ids and both
+totals are still returned in full; no partial closure or self-chosen
+approximate solution is ever emitted. An empty rating with no debits and no
+credits is a closed zero bill; requests that contain only debits or only
+credits are judged by the same complete-explanation rules with no special
+zero-padding.
+
+### Exact algorithm and the support witness guarantee
+
+The solver neither expands money by unit, nor enumerates shipment
+permutations, nor materializes the set of complete explanations:
+
+1. **Bounded credit allocations.** Each credit has at most two declared
+   targets, so the whole-credit allocations form a search tree of at most
+   `2^14` leaves, explored with integer nets. Any partial assignment that would
+   drive a debit negative is pruned. Allocations yielding the same resulting
+   net vector are merged, and for every credit the union of the debit targets
+   that can produce that vector is kept as a bitmask.
+2. **Equal-amount perfect matching.** For each distinct net vector, the exact
+   integer equalities turn the debit-to-shipment question into a bipartite
+   perfect-matching problem over at most twelve nodes per side (a debit is
+   adjacent only to declared candidates whose payable equals its net; zero net
+   therefore only reaches a zero-cents payable). One augmenting-path search
+   decides whether a perfect matching exists. The edges that occur in *some*
+   perfect matching are then derived from one matching's directed residual
+   graph: a matched edge, or an edge whose two endpoints lie in the same
+   strongly connected component, is allowed. This is linear in the graph size
+   and needs no permutation enumeration and no per-edge re-solve.
+3. **Witnessed, exhaustive support.** An edge enters a support set only when
+   (a) the credit allocation producing the current net vector assigns that
+   credit to the debit and (b) the debit has an allowed equal-amount matching
+   edge in the same vector. The two facts come from one joint explanation, so
+   every reported association is guaranteed to have a complete explanation as
+   its witness. Because every feasible credit allocation and every
+   matching-allowed edge are examined, no supported association is omitted.
+   The enumeration of allocations is bounded solely by the credit count (at
+   most fourteen, at most two candidates each), independent of money
+   magnitude; all amounts stay arbitrary-precision integers.
+
+The independent test oracle does not call any production function: on small
+inputs it re-rates with its own arithmetic, enumerates every whole-credit
+allocation and every debit-to-shipment bijection directly, applies the exact
+non-negativity, equality and unique-cover rules itself, and projects the
+support sets from the complete explanations it found. Production and oracle
+agree across deterministic generated samples and the named boundary cases
+(equal totals without a cover, credit overshoot, no credits, zero-cents rated
+payables, oversize exclusion, empty candidate arrays, ceiling-sized amounts,
+one-sided ambiguity, equal-money distinct identities and input/candidate
+reordering). A separate full-scale case exercises twelve shipments, twelve
+debits and fourteen credits to confirm the bounded search at production scale
+without enumerating shipment permutations or storing explanations.

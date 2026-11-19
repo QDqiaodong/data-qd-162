@@ -389,3 +389,13 @@ def temporal(data):
     acyclic (the temporal module reuses v1 rating helpers from this module)."""
     from .temporal import temporal as _temporal
     return _temporal(data)
+
+
+def reconcile(data):
+    """Schema v4 external bill closure and identity-ambiguity evidence.
+
+    Implementation lives in :mod:`parcel_rating.reconcile`, which reuses this
+    module's v1 :func:`analyze` as the read-only payable baseline.
+    """
+    from .reconcile import reconcile as _reconcile
+    return _reconcile(data)

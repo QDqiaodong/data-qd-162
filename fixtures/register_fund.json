@@ -1,0 +1,9 @@
+{
+  "request_id": "demo-fund-01",
+  "expected_version": 0,
+  "action": "fund",
+  "entries": [
+    {"account_id": "acct-A", "cents": 100},
+    {"account_id": "acct-B", "cents": 100}
+  ]
+}

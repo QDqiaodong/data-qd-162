@@ -1,0 +1,7 @@
+{
+  "request_id": "demo-amend-05",
+  "expected_version": 4,
+  "action": "amend",
+  "upserts": [],
+  "cancels": ["parcel-P"]
+}

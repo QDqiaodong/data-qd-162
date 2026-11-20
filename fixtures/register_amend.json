@@ -1,0 +1,64 @@
+{
+  "request_id": "demo-amend-02",
+  "expected_version": 1,
+  "action": "amend",
+  "upserts": [
+    {
+      "account_id": "acct-A",
+      "manifest_id": "manifest-M",
+      "shipment": {
+        "id": "parcel-P",
+        "service": "ground",
+        "zone": "Z1",
+        "weight_grams": 500,
+        "length_mm": 100,
+        "width_mm": 100,
+        "height_mm": 100,
+        "declared_cents": 0,
+        "remote": false
+      },
+      "tariff": {
+        "service": "ground",
+        "zone": "Z1",
+        "base_cents": 0,
+        "step_grams": 500,
+        "per_step_cents": 100,
+        "divisor_cm3_per_kg": 1000000000,
+        "max_girth_mm": 1000,
+        "remote_cents": 0,
+        "fuel_bp": 0,
+        "insurance_bp": 0,
+        "insurance_free_cents": 0
+      }
+    },
+    {
+      "account_id": "acct-B",
+      "manifest_id": "manifest-N",
+      "shipment": {
+        "id": "parcel-Q",
+        "service": "ground",
+        "zone": "Z1",
+        "weight_grams": 500,
+        "length_mm": 100,
+        "width_mm": 100,
+        "height_mm": 100,
+        "declared_cents": 0,
+        "remote": false
+      },
+      "tariff": {
+        "service": "ground",
+        "zone": "Z1",
+        "base_cents": 0,
+        "step_grams": 500,
+        "per_step_cents": 100,
+        "divisor_cm3_per_kg": 1000000000,
+        "max_girth_mm": 1000,
+        "remote_cents": 0,
+        "fuel_bp": 0,
+        "insurance_bp": 0,
+        "insurance_free_cents": 0
+      }
+    }
+  ],
+  "cancels": []
+}

@@ -1,6 +1,6 @@
 # Dimensional parcel rating
 
-The package has four entry points sharing the same strict JSON reader, source
+The package has five entry points sharing the same strict JSON reader, source
 SHA256 provenance and atomic report publication:
 
 1. **Per-piece rating (schema_version 1)** — `analyze(data)` /
@@ -17,6 +17,11 @@ SHA256 provenance and atomic report publication:
    own section below. `--reconcile` is pairwise mutually exclusive with
    `--plan` and `--temporal`. The three older entry points keep their original
    contracts exactly.
+5. **SQLite pre-deposit and manifest register (schema_version 5)** —
+   `parcel_rating.register.apply(database, data)` /
+   `parcel_rating.register.snapshot(database)` / the independent
+   `parcel-register` console script. Described in its own section below. It
+   never changes the four older entry points or the `cli.run` signature.
 
 ## v1 per-piece rating
 
@@ -465,3 +470,178 @@ one-sided ambiguity, equal-money distinct identities and input/candidate
 reordering). A separate full-scale case exercises twelve shipments, twelve
 debits and fourteen credits to confirm the bounded search at production scale
 without enumerating shipment permutations or storing explanations.
+
+## v5 SQLite pre-deposit and shipment-manifest register
+
+The fifth entry point is a durable book of fact backed by a single SQLite
+database (standard library `sqlite3` only; no network or external service).
+It combines two responsibilities under one optimistic-concurrency ledger:
+
+* **Pre-deposits.** `fund` adds integer-cent balances to named accounts.
+  `amend` replaces or cancels not-yet-shipped parcels as one batch. For every
+  account the invariant
+  `available = funded - held - spent >= 0` always holds, and `held` equals
+  exactly the sum of the frozen quotes of that account's currently held
+  parcels.
+* **Manifest lists.** Every non-shipped parcel belongs to exactly one open
+  manifest. `seal` atomically closes named manifests, moving their members'
+  frozen quotes from the corresponding accounts' `held` to `spent` and
+  permanently freezing that batch's members and amounts. Sealed members can
+  never be replaced, moved or cancelled.
+
+### Interfaces and storage
+
+* Python: `parcel_rating.register.apply(database, data)` returns the request
+  receipt; `parcel_rating.register.snapshot(database)` returns the current
+  state snapshot. `database` is a filesystem path; `apply` never mutates the
+  caller's `data` (shipment and tariff objects are defensively copied).
+* Console (a separate script independent of `parcel-rating`):
+  - apply: `parcel-register --database DB --source FILE --output FILE`;
+  - read-only: `parcel-register --database DB --snapshot --output FILE`
+    (`--source` is forbidden together with `--snapshot`).
+* A brand-new database has version 0 and is created by the first request.
+  `snapshot` never creates a database: a missing path is an error. A foreign
+  database or an unsupported register schema version is rejected rather than
+  silently rebuilt, cleared or overwritten. A format/business failure on a
+  brand-new path may leave an empty file but never an initialized register,
+  a business fact or a successful request record.
+* Money is arbitrary-precision Python integer cents. SQLite stores every
+  monetary column as canonical decimal **text**, so neither signed-64-bit
+  overflow nor floating-point conversion can corrupt a balance, quote or
+  aggregate. Per-line fund cents are capped at 10^15 but cumulative balances
+  and aggregates are unbounded.
+
+### Request envelope and validation
+
+Every request carries `request_id` and `expected_version` (a non-negative
+integer; booleans are rejected). The top-level fields are exact per action —
+no extra or missing fields — and inputs are read with the shared 8 MB reader
+with duplicate-JSON-key and non-finite-number rejection. Identifier classes
+(accounts, manifests, parcels, requests) use the common identifier rules and
+are independent namespaces.
+
+* `fund`: `{request_id, expected_version, action:"fund", entries}` with 1..1000
+  entries `{account_id, cents}`, each account appearing once, `cents` an
+  integer in 1..10^15. Unknown accounts are created by their first fund with
+  initial held/spent of zero.
+* `amend`: `{request_id, expected_version, action:"amend", upserts, cancels}`.
+  `upserts` has at most 1000 items, each exactly
+  `{account_id, manifest_id, shipment, tariff}`; `cancels` is at most 1000
+  parcel ids; the two arrays together contain at least one item. The shipment
+  reuses every v1 shipment field and the tariff every v1 complete tariff
+  field and bound; service/zone must correspond. Upsert shipment ids are
+  unique, cancel ids are unique, and the two sets are disjoint. Accounts must
+  already exist. Unknown target manifests are created as open on success.
+  Existing held parcels may be wholly replaced (account, manifest, physical
+  parameters and tariff); both the source and target manifest must be open.
+  Unknown parcels may be created; the ids of cancelled or shipped parcels are
+  permanently barred from re-registration. Cancels may only reference
+  currently held parcels. A zero-cents rated parcel is a real manifest
+  member; an oversize parcel cannot be registered and cannot masquerade as a
+  zero-cents member.
+* `seal`: `{request_id, expected_version, action:"seal", manifest_ids}` with
+  1..1000 distinct manifest ids, all existing and open. An empty open manifest
+  may be sealed (zero members, zero amount). All current held members become
+  shipped and the new version is recorded as `sealed_version`. Any failure
+  seals none of the named manifests.
+
+### Rating, batching and the account invariant
+
+Each upsert is rated through the unchanged v1 single-piece analysis (exact
+girth, dimensional weight, step ceiling, remote, fuel and half-up insurance
+rules), producing a complete v1 rated evidence row that becomes the parcel's
+frozen quote. Any oversize parcel rejects the whole batch. Quotes of parcels
+not in the current upsert set are never recomputed: an accepted quote is only
+replaced when its parcel is re-rated in a successful batch, and a shipped
+parcel's amount is immutable even if a later request carries a changed
+tariff.
+
+An amend may move parcels across accounts and open manifests, change physical
+parameters and re-rate, all in one batch. The fund check is evaluated on the
+state after the entire replacement/cancel set is applied — never by charging
+each upsert in input order — so a cross-account swap whose final per-account
+balances are non-negative must succeed even though an intermediate state
+would be negative. Old holds are replaced together with the new holds: a
+batch failure releases no old hold, creates no manifest, changes no version
+and consumes no request id. On success each account's `funded` is unchanged;
+`held` is the sum of its held parcels' frozen `total_cents`, `spent` the sum
+of its shipped parcels' frozen amounts, and `available = funded-held-spent`.
+Cancelling only marks a parcel cancelled and releases its hold while
+retaining its last accepted parcel, tariff, quote, account and manifest
+identity for audit; a cancelled parcel is no longer an active manifest
+member. Cancelling every member never deletes the (empty, open) manifest.
+`seal` only performs an equal held-to-spent transfer and never deducts
+availability again.
+
+### Optimistic concurrency, idempotency and receipts
+
+Each new request is handled in one SQLite transaction. Inside it the current
+version is checked against `expected_version`, the business terminal state is
+validated, the facts are posted and an immutable request receipt plus the
+canonical request content are saved. A successful new request increments the
+version by one; any error rolls the whole batch back. Writers are serialized
+with an immediate write transaction (with a bounded busy timeout), so
+concurrent new requests carrying the same `expected_version` have at most one
+winner; the others get a version conflict and no lost update is possible.
+
+The canonical request identity sorts the set-valued arrays (`entries` by
+account id, `upserts` by shipment id, `cancels` and `manifest_ids` by id) and
+re-serializes nested objects with sorted keys, so array permutation, nested
+key order and JSON whitespace are irrelevant; every other field, including
+`expected_version`, participates in the identity.
+
+* Same id and identical canonical content: the original receipt is returned
+  directly, before any current-version or membership check — even after the
+  database has advanced — together with the original point-in-time snapshot.
+* Same id with different canonical content: rejected; the original receipt is
+  never rewritten.
+* A failed request stores no business receipt and does not consume its id;
+  corrected content may retry under that id. Identical content under a new id
+  is a new request and goes through normal version/state checks.
+
+The SQLite commit is the point of effect. The report file is published
+afterwards as a separate step; the two are not a cross-file atomic
+transaction. If report writing fails after the commit, the CLI exits 2 and
+names the committed request id and version on stderr; the database is not
+rolled back or deleted, and replaying the same request restores the original
+receipt without posting anything twice. Format, business, version-conflict
+and commit failures exit 2 without overwriting an existing report.
+Database/output path collisions and symlinked database or output paths are
+refused before any business write; the shared safe-replace publication
+behavior is retained.
+
+### Snapshot and receipt shapes
+
+The state snapshot is exactly
+`{version, accounts, bookings, manifests}` where `version` is the count of
+committed new requests:
+
+* `accounts`, sorted by account id, each exactly
+  `{account_id, funded_cents, held_cents, spent_cents, available_cents}`.
+* `bookings` keeps every parcel including cancelled ones, sorted by id, each
+  exactly `{id, account_id, manifest_id, status, shipment, tariff, quote}`
+  with `status` one of `held`/`cancelled`/`shipped`; `quote` is exactly the
+  v1 single-piece rated result row (including `id`, `status` and all billing
+  evidence) and can never be supplied directly by a request; `shipment` and
+  `tariff` are the last accepted input objects.
+* `manifests`, sorted by manifest id, each exactly
+  `{manifest_id, status, member_ids, total_cents, sealed_version}` with
+  `status` `open`/`sealed`, `member_ids` sorted and listing only the current
+  held members or, once sealed, the shipped members (never cancelled
+  parcels), `total_cents` the sum of those frozen quotes, and
+  `sealed_version` null while open.
+
+All snapshot sections are read from one committed read snapshot so they can
+never mix two versions. The apply receipt is exactly
+`{request_id, version, snapshot}` where both `version` and
+`snapshot.version` are the version after that request's first success and the
+snapshot is the complete state at that point in time; later requests never
+mutate a stored receipt.
+
+### Console envelope
+
+Both CLI modes emit `{schema_version:5, source_sha256, result}`. On the apply
+branch `source_sha256` is the SHA-256 of that invocation's exact source
+bytes — even when the result is an old retry receipt — and `result` is the
+receipt. On the snapshot branch `source_sha256` is null and `result` is the
+current state snapshot. The stdout JSON and the published file are identical.

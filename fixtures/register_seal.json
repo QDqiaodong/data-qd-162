@@ -1,0 +1,6 @@
+{
+  "request_id": "demo-seal-04",
+  "expected_version": 3,
+  "action": "seal",
+  "manifest_ids": ["manifest-M"]
+}

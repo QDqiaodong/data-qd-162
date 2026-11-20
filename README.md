@@ -19,6 +19,14 @@ uv pip check --python .venv/bin/python
 .venv/bin/parcel-rating --temporal --source fixtures/temporal_input.json --output run/temporal_report.json
 # v4 外部账单闭合核销与身份歧义证据（schema_version 4；--reconcile 与 --plan/--temporal 两两互斥）
 .venv/bin/parcel-rating --reconcile --source fixtures/reconcile_input.json --output run/reconcile_report.json
+# v5 SQLite 预存款与交运清单登记簿（独立 parcel-register 控制台，schema_version 5）
+mkdir -p run/register
+.venv/bin/parcel-register --database run/register/book.db --source fixtures/register_fund.json   --output run/register/01.json
+.venv/bin/parcel-register --database run/register/book.db --source fixtures/register_amend.json  --output run/register/02.json
+.venv/bin/parcel-register --database run/register/book.db --source fixtures/register_swap.json   --output run/register/03.json
+.venv/bin/parcel-register --database run/register/book.db --source fixtures/register_seal.json   --output run/register/04.json
+.venv/bin/parcel-register --database run/register/book.db --source fixtures/register_cancel.json --output run/register/05.json
+.venv/bin/parcel-register --database run/register/book.db --snapshot --output run/register/snapshot.json
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
@@ -45,6 +53,23 @@ v2 样例 `fixtures/plan_input.json` 对三件包裹、三条 dispatch rule 给�
 
 算法不按金额单位展开、不枚举运单排列、不物化全部解释：枚举有界整张贷项归属（每条至多 2 候选、至多 `2^14`），按整数净额剪去过冲并合并相同净额向量；对每个净额向量把精确等式化为至多 12 节点的二分图完美匹配，用增广路判存在、用残差图强连通分量一次性求出“出现在某个完美匹配中”的全部边（线性、无逐边重解）。每条支持边都由同一联合解释作证，且因遍历了全部可行归属与全部允许边而无遗漏。测试含不调用生产求解函数的独立小规模穷举预言机（自算计费、枚举全部贷项归属与运单双射后投影支持），覆盖总额相等但唯一覆盖失败、信用过冲、无贷项、零元 rated、oversize 排除、空候选、极大金额、单侧歧义、同额多身份与数组/候选重排，并有 12 运单/12 借项/14 贷项真实规模案例。完整义务见 [数据契约](docs/contract.md)。
 
+## SQLite 预存款与交运清单登记簿（v5 要点）
+
+v5 是基于标准库 `sqlite3` 的持久登记簿，提供独立控制台 `parcel-register` 与 Python 接口 `parcel_rating.register.apply(database, data)`、`parcel_rating.register.snapshot(database)`；不改动旧四个入口与 `cli.run` 签名，仅用标准库、不接外部服务。两类职责共用一本账：
+
+- **预存款**：`fund` 给命名账户增加整数分余额（单条 1..10^15、同请求同账户仅一次，累计不受单条上限约束）；`amend` 对未交运包裹做整批替换或取消。任意时刻每个账户满足 `available = funded - held - spent >= 0`，且 `held` 恰等于其全部 held 包裹冻结报价之和。
+- **交运清单**：未交运包裹恰属一个 open 清单；`seal` 原子封闭指定清单，把成员冻结报价从账户 `held` 等额转入 `spent`，并以新版本号 `sealed_version` 永久冻结该批成员与金额。sealed 成员禁止替换、移动或取消；空 open 清单也可封单（零成员零金额）；取消全部成员不会删除清单。
+
+每次请求携带 `request_id` 与非负整数 `expected_version`（拒绝 bool），在同一 SQLite 事务内串行完成版本检查、业务终态校验、入账与不可变请求回执保存；新请求成功版本加一，任一错误整批回滚——旧占用不会释放、清单不会创建、版本与 request_id 都不被消费。并发写以 `BEGIN IMMEDIATE` 加忙等待序列化，相同 `expected_version` 的新请求至多一个成功，其余报版本冲突且不丢更新。资金检查针对**整批替换/取消后的最终状态**，绝不按输入顺序逐件扣款，因此跨账户、跨 open 清单的整批交换只要最终各账户非负就必须成功。报价完全复用既有 v1 逐件规则（围长、体积重、步长向上取整、偏远、燃油与 half-up 保险），oversize 拒绝整批且不能当零元件；本批未 upsert 的包裹绝不重算，已接收报价只在整批成功后才被替换，封单后即使费率变化也不改变已交运金额。
+
+幂等身份按集合语义规范化：`entries` 按账户 ID、`upserts` 按 shipment.id、`cancels`/`manifest_ids` 按 ID 排序，嵌套对象键序与 JSON 空白无关，其余字段（含 `expected_version`）全部参与身份。同 ID 且规范内容相同的重试直接返回第一次成功的原回执与原时点快照，**先于**当前版本与成员状态检查，即使库版本已推进；同 ID 异内容拒绝且不改写原回执；失败请求不保留业务回执、不占用 ID，修正后可用同一 ID 重试；同内容换新 ID 则按当前版本正常检查。
+
+金额一律为 Python 任意精度整数分，SQLite 货币列以规范十进制**文本**存储，不会 64 位溢出或转浮点；聚合金额可超过 2^63 仍精确。状态快照恰为 `{version, accounts, bookings, manifests}`：bookings 保留全部包裹（含取消件，按 id 排序），quote 恰为 v1 逐件 rated 证据行、禁止由请求直接填金额；manifests 的 member_ids 只含当前 held 成员或封单时 shipped 成员（不含 cancelled）。快照四部分取自同一已提交读快照。回执恰为 `{request_id, version, snapshot}`，旧回执不被后续请求改变。
+
+CLI 外层恰为 `{schema_version:5, source_sha256, result}`：应用请求时 `source_sha256` 对应当次源字节（重试返回旧回执也用本次字节摘要），只读快照时为 null。数据库提交是唯一生效点，报告导出是独立第二步、并非跨文件原子事务：提交后若报告写入失败，退出 2 并在 stderr 明确已提交的 request_id 与 version，数据库不回滚不删除，重放同一请求即恢复原回执且不重复入账。数据库/输出路径冲突、数据库或输出符号链接在业务写入前拒绝；格式/业务/版本冲突退出 2 且不覆盖原报告。非本应用数据库或不支持的 schema 版本一律拒绝，不静默重建；`snapshot` 不会创建不存在的库；新库首次请求失败可留下空文件但不留任何已生效事实。
+
+`fixtures/register_*.json` 是五请求联动自制样例（fund→amend→跨账户 swap→seal→cancel，冻结报价均为 100 分），终态 version=5、P 为 cancelled、Q 为 shipped、A.spent=100、B.available=100。测试含完整 API 契约与联动验收（含 100→120 报价替换失败/追资成功、封单永久冻结、零元 rated 与 oversize 区别、半分舍入与步长边界、超 64 位精确聚合、同版本并发、同 ID 异内容、失败后复用 ID）、不调用生产 apply/snapshot 的独立小状态参考模型差分测试，以及真实子进程 CLI 测试（跨进程重放旧请求返回旧时点快照、提交后导出失败再恢复、并发同版本仅一次成功、路径/符号链接/重复键与旧四模式回归）。完整义务见 [数据契约](docs/contract.md)。
+
 ## 批量分配要点
 
 计划模式顶层恰为 `tariffs`、`shipments`、`dispatch_rules`；dispatch rule 至多 4 条，shipment 至多 12 件，候选 `services` 非空且不重复，每个 `(service, zone)` 必须同时存在费率与规则。围长超限只令该候选 `oversize`，不提前丢弃包裹。组容量按成员**计费重之和**与件数约束；非空组按 `B=max(S,minimum_base_cents)` 计最低收费，燃油在组层面只 half-up 取整一次，保险逐件求和。求解器对每条规则枚举全部容量可行子集并做备忘录搜索，穷举所有合法分配以保证全局最优；同价依次按更少非空组、包裹 ID Unicode 升序构造的 service 向量字典序最小决胜。无完整可行分配时 `feasible=false`、`total_cents=null`、退出码仍为 0；非法输入退出 2。算法、字段与可重算性的完整说明见 [数据契约](docs/contract.md)。
@@ -54,5 +79,5 @@ v2 样例 `fixtures/plan_input.json` 对三件包裹、三条 dispatch rule 给�
 输入和输出不得相同，输出符号链接拒绝。单操作者批处理，不承诺并发发布或断电恢复。
 同输入重跑不累加，输入数组重排不改变规范化 `result`（SHA256 仍对应当次原始字节）。测试使用临时目录，运行产物在忽略的run/。
 
-src/parcel_rating/model.py 为业务模型门面（`analyze` 逐件计费、`plan` 批量分配、`temporal` 转发到时间线实现并复用同一套 v1 逐件规则、`reconcile` 转发到核销实现并以 v1 `analyze` 为只读应付基准），temporal.py 实现 v3 权威修订时间线，reconcile.py 实现 v4 外部账单闭合核销与身份支持证据，common.py 提供受限JSON及报告发布，
-cli.py 衔接数据链路（`--plan`/`--temporal`/`--reconcile` 两两互斥，schema_version 1/2/3/4）。fixtures 为明确自制样例，代码与样例采用MIT许可。
+src/parcel_rating/model.py 为业务模型门面（`analyze` 逐件计费、`plan` 批量分配、`temporal` 转发到时间线实现并复用同一套 v1 逐件规则、`reconcile` 转发到核销实现并以 v1 `analyze` 为只读应付基准），temporal.py 实现 v3 权威修订时间线，reconcile.py 实现 v4 外部账单闭合核销与身份支持证据，register.py 实现 v5 SQLite 预存款与交运清单登记簿（复用 v1 逐件报价生成冻结证据，货币以十进制文本持久化），register_cli.py 提供独立的 `parcel-register` 控制台，common.py 提供受限JSON及报告发布，
+cli.py 衔接 v1..v4 数据链路（`--plan`/`--temporal`/`--reconcile` 两两互斥，schema_version 1/2/3/4；v5 走独立脚本，schema_version 5）。fixtures 为明确自制样例，代码与样例采用MIT许可。

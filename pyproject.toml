@@ -9,5 +9,6 @@ requires-python = ">=3.11"
 dependencies = []
 [project.scripts]
 parcel-rating = "parcel_rating.cli:main"
+parcel-register = "parcel_rating.register_cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]

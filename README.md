@@ -27,6 +27,8 @@ mkdir -p run/register
 .venv/bin/parcel-register --database run/register/book.db --source fixtures/register_seal.json   --output run/register/04.json
 .venv/bin/parcel-register --database run/register/book.db --source fixtures/register_cancel.json --output run/register/05.json
 .venv/bin/parcel-register --database run/register/book.db --snapshot --output run/register/snapshot.json
+# v6 离线发布评估（独立 parcel-rate-release 控制台，schema_version 6，JSON Lines 输入）
+.venv/bin/parcel-rate-release --source fixtures/release_input.jsonl --output run/release_report.json
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
@@ -70,6 +72,14 @@ CLI 外层恰为 `{schema_version:5, source_sha256, result}`：应用请求时 `
 
 `fixtures/register_*.json` 是五请求联动自制样例（fund→amend→跨账户 swap→seal→cancel，冻结报价均为 100 分），终态 version=5、P 为 cancelled、Q 为 shipped、A.spent=100、B.available=100。测试含完整 API 契约与联动验收（含 100→120 报价替换失败/追资成功、封单永久冻结、零元 rated 与 oversize 区别、半分舍入与步长边界、超 64 位精确聚合、同版本并发、同 ID 异内容、失败后复用 ID）、不调用生产 apply/snapshot 的独立小状态参考模型差分测试，以及真实子进程 CLI 测试（跨进程重放旧请求返回旧时点快照、提交后导出失败再恢复、并发同版本仅一次成功、路径/符号链接/重复键与旧四模式回归）。完整义务见 [数据契约](docs/contract.md)。
 
+## 离线发布评估（v6 要点）
+
+v6 是面向同一受众的报表序列离线评估器，提供独立控制台 `parcel-rate-release` 与 Python 接口 `parcel_rating.release.run(source)`、`parcel_rating.release.evaluate(min_customers, requests, batches)`；不改动旧五个入口，仅用标准库。输入为 UTF-8 JSON Lines：首行是 `{min_customers, requests}`（门槛 2..100、至多 24 个有序请求），其余每行一批货件，恰含 `tariffs`、`shipments`、`customers`——前两者完整沿用 v1 逐件契约与单批限制，`customers` 必须恰好覆盖本批货件 ID 到客户 ID 的映射；货件 ID 全文件唯一，客户 ID 跨批稳定。只统计 v1 判为 rated 的货件及其 `total_cents`；同一客户多票计入件数与运费，但每行客户集合只算一次。
+
+每个请求按声明顺序尝试 `levels`（`service_zone`/`service`/`zone`/`total` 的子集，不增不减）：把已发布的每一行与正在试算层级的每一行一起视作客户集合的成员关系，只考察至少出现在一行的客户，按“属于/不属于”模式完全相同划分等价类，**每个非空等价类都不少于 min_customers 位客户**才允许发布；不同请求的同名行是不同观察，已发布行不撤回也不被本请求过滤条件重限。首个通过的层级整体发布其全部非空行（不得单独隐藏某行）；失败层级不留痕迹。无匹配货件为 `empty`，全部层级失败为 `withheld`，两者均不改变发布历史；被拒试算不对外返回成员、类人数、失败行或其运费。报告 `schema_version=6`，result 按请求顺序给出 `{id, status, level, rows}`，行内恰为 `{key, customer_count, shipment_count, total_cents}` 并按 key 的 Unicode 字典序排列；货件、批次与筛选数组重排不改变 result。完整口径见 [数据契约](docs/contract.md)。
+
+资源纪律：支持 40 万票、24 请求、rated 货件至多 12 服务/12 分区（越界为输入错误），目标容器 128 MiB 进程内存、允许临时磁盘。实现逐行流式读取，不在内存积存原始货件；货件 ID 唯一性与客户注册表放在临时 SQLite 库，单元格只留计数器与紧凑客户索引列表，发布状态用划分精炼（每客户一个类 id、失败试算精确回滚），绝不为每个客户保存覆盖全部历史与试算行的布尔列表。可复现实验在 `tests/test_cli_release.py` 的 `ScaleReleaseTests`：确定性生成 40 万票（40 批、跨批重复热客户与冷客户、约 1% 超限件、24 个交替粒度请求），经真实 CLI 子进程运行并由子进程用 `resource.getrusage(RUSAGE_SELF)` 自报峰值 RSS（fork 会继承父进程 maxrss，外部观察会失真），断言低于 128 MiB 并把耗时、峰值与状态分布记录到 `run/release_scale_metrics.json`。复现：`PYTHONPATH=src python3 -m unittest tests.test_cli_release.ScaleReleaseTests -v`（安装后套件内自动运行）；当前参考值约 6 秒、峰值约 94 MiB。
+
 ## 批量分配要点
 
 计划模式顶层恰为 `tariffs`、`shipments`、`dispatch_rules`；dispatch rule 至多 4 条，shipment 至多 12 件，候选 `services` 非空且不重复，每个 `(service, zone)` 必须同时存在费率与规则。围长超限只令该候选 `oversize`，不提前丢弃包裹。组容量按成员**计费重之和**与件数约束；非空组按 `B=max(S,minimum_base_cents)` 计最低收费，燃油在组层面只 half-up 取整一次，保险逐件求和。求解器对每条规则枚举全部容量可行子集并做备忘录搜索，穷举所有合法分配以保证全局最优；同价依次按更少非空组、包裹 ID Unicode 升序构造的 service 向量字典序最小决胜。无完整可行分配时 `feasible=false`、`total_cents=null`、退出码仍为 0；非法输入退出 2。算法、字段与可重算性的完整说明见 [数据契约](docs/contract.md)。
@@ -79,5 +89,5 @@ CLI 外层恰为 `{schema_version:5, source_sha256, result}`：应用请求时 `
 输入和输出不得相同，输出符号链接拒绝。单操作者批处理，不承诺并发发布或断电恢复。
 同输入重跑不累加，输入数组重排不改变规范化 `result`（SHA256 仍对应当次原始字节）。测试使用临时目录，运行产物在忽略的run/。
 
-src/parcel_rating/model.py 为业务模型门面（`analyze` 逐件计费、`plan` 批量分配、`temporal` 转发到时间线实现并复用同一套 v1 逐件规则、`reconcile` 转发到核销实现并以 v1 `analyze` 为只读应付基准），temporal.py 实现 v3 权威修订时间线，reconcile.py 实现 v4 外部账单闭合核销与身份支持证据，register.py 实现 v5 SQLite 预存款与交运清单登记簿（复用 v1 逐件报价生成冻结证据，货币以十进制文本持久化），register_cli.py 提供独立的 `parcel-register` 控制台，common.py 提供受限JSON及报告发布，
-cli.py 衔接 v1..v4 数据链路（`--plan`/`--temporal`/`--reconcile` 两两互斥，schema_version 1/2/3/4；v5 走独立脚本，schema_version 5）。fixtures 为明确自制样例，代码与样例采用MIT许可。
+src/parcel_rating/model.py 为业务模型门面（`analyze` 逐件计费、`plan` 批量分配、`temporal` 转发到时间线实现并复用同一套 v1 逐件规则、`reconcile` 转发到核销实现并以 v1 `analyze` 为只读应付基准），temporal.py 实现 v3 权威修订时间线，reconcile.py 实现 v4 外部账单闭合核销与身份支持证据，register.py 实现 v5 SQLite 预存款与交运清单登记簿（复用 v1 逐件报价生成冻结证据，货币以十进制文本持久化），register_cli.py 提供独立的 `parcel-register` 控制台，release.py 实现 v6 离线发布评估（JSON Lines 流式读取、SQLite 临时身份映射、划分精炼判定），release_cli.py 提供独立的 `parcel-rate-release` 控制台，common.py 提供受限JSON及报告发布，
+cli.py 衔接 v1..v4 数据链路（`--plan`/`--temporal`/`--reconcile` 两两互斥，schema_version 1/2/3/4；v5/v6 走独立脚本，schema_version 5/6）。fixtures 为明确自制样例，代码与样例采用MIT许可。

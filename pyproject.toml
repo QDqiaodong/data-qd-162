@@ -10,5 +10,6 @@ dependencies = []
 [project.scripts]
 parcel-rating = "parcel_rating.cli:main"
 parcel-register = "parcel_rating.register_cli:main"
+parcel-rate-release = "parcel_rating.release_cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]

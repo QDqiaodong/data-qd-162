@@ -1,6 +1,6 @@
 # Dimensional parcel rating
 
-The package has five entry points sharing the same strict JSON reader, source
+The package has six entry points sharing the same strict JSON reader, source
 SHA256 provenance and atomic report publication:
 
 1. **Per-piece rating (schema_version 1)** — `analyze(data)` /
@@ -22,6 +22,12 @@ SHA256 provenance and atomic report publication:
    `parcel_rating.register.snapshot(database)` / the independent
    `parcel-register` console script. Described in its own section below. It
    never changes the four older entry points or the `cli.run` signature.
+6. **Offline release evaluation (schema_version 6)** —
+   `parcel_rating.release.run(source)` /
+   `parcel_rating.release.evaluate(min_customers, requests, batches)` / the
+   independent `parcel-rate-release` console script. Described in its own
+   section below. It reads UTF-8 JSON Lines (not the single-JSON reader) and
+   never changes the five older entry points.
 
 ## v1 per-piece rating
 
@@ -645,3 +651,130 @@ branch `source_sha256` is the SHA-256 of that invocation's exact source
 bytes — even when the result is an old retry receipt — and `result` is the
 receipt. On the snapshot branch `source_sha256` is null and `result` is the
 current state snapshot. The stdout JSON and the published file are identical.
+
+## v6 offline release evaluation
+
+The sixth entry point simulates, offline and in request order, the sequence
+of freight-summary reports that **one fixed audience** receives, and decides
+for each request the first declared aggregation granularity that may be
+published without exposing any too-small customer equivalence class. It is a
+read-only evaluation: no report is ever actually sent, and the tool's only
+output is the decision report.
+
+### Input contract (JSON Lines)
+
+The source is a UTF-8 JSON Lines file. Decoding errors, blank lines, lines
+over 8 MB, duplicate JSON keys, non-finite numbers and non-object lines are
+input errors (CLI exit code 2, existing report preserved).
+
+* **Line 1 (header)**: exactly `{min_customers, requests}`.
+  `min_customers` is an integer in 2..100 (booleans rejected). `requests` is
+  an array of at most 24 request objects; it may be empty.
+* **Every later line**: one shipment batch with exactly
+  `{tariffs, shipments, customers}`. `tariffs` and `shipments` follow the v1
+  per-piece input contract and per-batch limits unchanged (at most 500
+  tariffs and 10000 shipments per batch, unique ids, every shipment matched
+  to a tariff, every numeric and boolean bound). `customers` is an object
+  mapping **this batch's** shipment ids to customer ids; it must cover
+  exactly the batch's shipments — no missing and no extra keys. Customer ids
+  follow the common identifier rules; one customer may own many shipments,
+  and customer ids are stable across batches. Shipment ids are unique across
+  the whole file, and the file holds at most 400000 shipments in total.
+
+Each request has exactly `{id, services, zones, levels}`:
+
+* `id` follows the common identifier rules and is unique across requests.
+* `services` and `zones` are each `null` (no restriction) or a nonempty
+  array of distinct identifiers. A rated shipment is selected only when both
+  filters pass. Unknown but legal service/zone ids simply match nothing.
+* `levels` is a nonempty array without duplicates whose elements are drawn
+  from `service_zone`, `service`, `zone`, `total`; it is the tried order.
+  The levels are tried independently as declared — the tool never adds,
+  removes or reorders levels.
+
+Across the whole file, the rated shipments may span at most 12 distinct
+services and 12 distinct zones; exceeding either bound is an input error.
+The complete input is validated before any request is decided, so an illegal
+record fails the run even when no request would have selected it.
+
+### Aggregation
+
+Only shipments the v1 per-piece interface judges `rated` participate, with
+their v1 `total_cents`; `oversize` shipments never enter any statistic.
+Different batches may carry different tariffs for the same service/zone. A
+customer's several shipments add to the shipment count and the freight sum
+but count once in every row's customer set.
+
+For one request and one level, the selected rated shipments are grouped into
+**all** nonempty rows of that level (`service_zone`: one row per pair;
+`service`: per service; `zone`: per zone; `total`: one row). Publishing a
+level always publishes its complete row set; single rows can never be hidden
+or cherry-picked.
+
+### Release rule (membership equivalence)
+
+Take every already published row of every earlier request plus every
+candidate row of the level being tried, and view each row as the set of
+customers it contains. Consider only customers appearing in at least one of
+these rows. Two customers are equivalent iff their member/not-member pattern
+over all these rows is identical; the equivalence classes are the maximal
+groups of customers sharing one pattern. The level may publish iff **every**
+nonempty equivalence class holds at least `min_customers` distinct
+customers.
+
+* Same-key rows from different requests are different observations; a
+  customer may belong to several rows of one report.
+* Published rows are never retracted, and their membership is never
+  re-filtered by a later request's selection.
+* Requests are decided in array order. For each request the declared levels
+  are tried from the first; the first passing level publishes and the rest
+  are not tried. A failed level leaves no trace: its rows never join the
+  observable history used by later decisions.
+* A request whose filters select no rated shipment is `empty`; a request
+  whose levels all fail is `withheld`. Neither changes the release history.
+* A rejected trial reveals nothing: the report carries no membership, class
+  sizes, failed rows or freight for it. The rule judges only the membership
+  semantics above; it does not claim to resist other external information or
+  numeric inference.
+
+### Result and report
+
+`parcel_rating.release.run(source)` returns the full report; the CLI
+envelope is `{"schema_version": 6, "source_sha256": ..., "result": ...}`
+with the SHA-256 of the exact source bytes of that invocation. `result` is
+an array in input request order, each item exactly
+`{id, status, level, rows}`:
+
+* `status` is `published`, `empty` or `withheld`. For the latter two,
+  `level` is `null` and `rows` is empty.
+* For `published`, `level` is the level that passed and `rows` holds every
+  row of that level, each exactly `{key, customer_count, shipment_count,
+  total_cents}`. `key` is the string array in the level's order
+  (`service_zone` → `[service, zone]`, `service` → `[service]`,
+  `zone` → `[zone]`, `total` → `[]`); rows are sorted by key in Unicode
+  code-point order.
+
+Reordering shipments, batch lines or the `services`/`zones` arrays never
+changes `result` (reordering `requests` or a request's `levels` can).
+`source_sha256` always reflects the raw bytes of the current invocation. On
+success the CLI prints the same parsed value it publishes; any input or I/O
+failure exits 2 and preserves an existing report.
+
+### Scale and resource discipline
+
+Supported scale: 400000 shipments, 24 requests, 12 services and 12 zones
+among rated shipments, in a 128 MiB process-memory Linux container (temporary
+disk is allowed). The implementation streams the file line by line: raw
+shipment objects are dropped after each batch, shipment-id uniqueness and
+the customer-id registry live in a temporary SQLite database rather than on
+the Python heap, each `(service, zone)` cell keeps only counters and a
+compact customer-index list, and the release state is partition refinement
+(one class id per customer with exact rollback of failed trials) — never a
+per-customer boolean vector over all published and trial rows. The
+reproducible 400k-shipment experiment (hot/cold customer grouping,
+cross-batch repeat customers, alternating granularity attempts) lives in
+`tests/test_cli_release.py` (`ScaleReleaseTests`); it measures the CLI
+process peak RSS via the child's own `resource.getrusage` self-report (a
+forked child inherits the parent's maxrss, so an outside observer in a busy
+process would misread it) and records the metrics to
+`run/release_scale_metrics.json`.

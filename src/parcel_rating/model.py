@@ -399,3 +399,15 @@ def reconcile(data):
     """
     from .reconcile import reconcile as _reconcile
     return _reconcile(data)
+
+
+def impact(data):
+    """Schema v7 carrier-rate price impact and scale-batch review.
+
+    Implementation lives in :mod:`parcel_rating.impact`, which reuses this
+    module's v1 tariff/parcel validation and half-up helpers. It only compares
+    two candidate tariffs at one corrected weight per shipment: no historical
+    quote is changed and no charge is produced.
+    """
+    from .impact import evaluate as _evaluate
+    return _evaluate(data)

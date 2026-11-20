@@ -29,6 +29,8 @@ mkdir -p run/register
 .venv/bin/parcel-register --database run/register/book.db --snapshot --output run/register/snapshot.json
 # v6 离线发布评估（独立 parcel-rate-release 控制台，schema_version 6，JSON Lines 输入）
 .venv/bin/parcel-rate-release --source fixtures/release_input.jsonl --output run/release_report.json
+# v7 承运费率涨价敞口与秤批复核（schema_version 7；--impact 与 --plan/--temporal/--reconcile 互斥）
+.venv/bin/parcel-rating --impact --source fixtures/impact_input.json --output run/impact_report.json
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
@@ -80,6 +82,18 @@ v6 是面向同一受众的报表序列离线评估器，提供独立控制台 `
 
 资源纪律：支持 40 万票、24 请求、rated 货件至多 12 服务/12 分区（越界为输入错误），目标容器 128 MiB 进程内存、允许临时磁盘。实现逐行流式读取，不在内存积存原始货件；货件 ID 唯一性与客户注册表放在临时 SQLite 库，单元格只留计数器与紧凑客户索引列表，发布状态用划分精炼（每客户一个类 id、失败试算精确回滚），绝不为每个客户保存覆盖全部历史与试算行的布尔列表。可复现实验在 `tests/test_cli_release.py` 的 `ScaleReleaseTests`：确定性生成 40 万票（40 批、跨批重复热客户与冷客户、约 1% 超限件、24 个交替粒度请求），经真实 CLI 子进程运行并由子进程用 `resource.getrusage(RUSAGE_SELF)` 自报峰值 RSS（fork 会继承父进程 maxrss，外部观察会失真），断言低于 128 MiB 并把耗时、峰值与状态分布记录到 `run/release_scale_metrics.json`。复现：`PYTHONPATH=src python3 -m unittest tests.test_cli_release.ScaleReleaseTests -v`（安装后套件内自动运行）；当前参考值约 6 秒、峰值约 94 MiB。
 
+## 承运费率涨价敞口与秤批复核（v7 要点）
+
+v7 是**只读预估**：同一票、同一校正重量下比较新旧两套费率，不改历史报价，也不产生任何扣款或入账。入口为 `parcel-rating --impact --source FILE --output FILE` 与 Python `parcel_rating.impact.evaluate(data)`（`parcel_rating.model.impact(data)` 转发）；`--impact` 与 `--plan`/`--temporal`/`--reconcile` 两两互斥，旧六个入口行为不变。顶层恰为 `old_tariffs`、`new_tariffs`、`scale_batches`、`shipments`，四个数组都允许为空。两份费率完整沿用 v1 字段、键唯一性、数值与条数校验，试点只接受 `step_grams>=250`；每票须在两表都找到同一 `(service,zone)`。包裹沿用 v1 全部字段与校验及 10000 票上限，外加 `scale_batch_id`；`weight_grams` 是原秤读数，尺寸/申报价值/偏远标志保持原义，运单 ID 全局唯一、每个声明秤批至少一票且每票必须引用已声明秤批。
+
+每个秤批恰含 `scale_batch_id`、`min_delta_grams`、`max_delta_grams`、`references`：边界是 `-20000..20000` 整数（可相等、下界不得大于上界），`references` 为 1..16 条 `{reference_id, reading_grams, true_min_grams, true_max_grams}`，参考物 ID 批内唯一、三个重量在 v1 实际重量范围内、真值下界不得大于上界，拒绝一切 bool 整数。整批共用同一整数校正量：取声明闭区间与每条参考物 `[true_min−reading, true_max−reading]`、以及每票（含超围长票）保证校正重量落在 v1 实际重量范围 `[1−w, 10^9−w]` 的闭区间的交集。交集为空是合法业务结论——保留最终上下界并标 `conflict`，不丢参考物、不单独裁剪某票重量；无论是否矛盾都先完整校验输入。
+
+两套费率各自按原逐件规则判断围长；两边均 `rated` 且秤批可行时，同一校正量下的差价 = 新 `total_cents` − 旧 `total_cents`，两边用同一校正重量、各自算法体积重、步长、偏远费、燃油费与 half-up 保险费，金额精确到分。任一边 `oversize` 只保留两边判定，该票不进任何差价或敞口（绝不当作零元报价）；秤批矛盾时仍保留两边判定，但该批所有票差价未知。客服看单票差价最小/最大值（并给出能达到该极值的最小校正量），财务看同一校正量下全批可比票的**净差价**（有正有负）与**涨价敞口**（只累计正差价）的极值——不能把同批单票极值相加，也不能把净差价先截成非负当敞口。无票可比的可行批两合计恒为零；各批独立取值，全组合两项合计分别取各批对应上下界之和；任一秤批矛盾则全组合 `incomplete`、两合计为 `null`，但其它批仍完整给出。空输入全组合完成且两区间均为 `[0,0]`。
+
+报告 `schema_version=7`，result 恰含：`shipments`（按 `id` 排序，`{id, scale_batch_id, old_status, new_status, delta_cents}`，`delta_cents` 为 `{min_cents,max_cents,min_at_grams,max_at_grams}` 或 `null`）、`scale_batches`（按 `scale_batch_id` 排序，`{scale_batch_id, status, lower_delta_grams, upper_delta_grams, net_change_cents, increase_cents}`，`status` 为 `feasible`/`conflict`，矛盾批两金额区间为 `null`）、`portfolio`（`{status, net_change_cents, increase_cents}`，完成时金额区间只含 `{min_cents,max_cents}`，否则为 `null`）。`source_sha256` 对原始输入字节计算，成功时文件与 stdout 解析值一致；非法结构/重复键/坏引用/越界/读写失败退出 2 且保留旧报告，校准矛盾正常成报退出 0；拒绝源与目标同文件及符号链接目标，沿用严格 JSON 与 8MB 限制及原子发布，重排任意输入数组不改变 result。
+
+耗时只随“票数 × 每票在两套费率下的步长断点数”增长（断点由校正区间宽度除以两表 `step_grams` 决定），绝不逐克枚举也不物化票与全部校正量的笛卡尔积：单票差价是分段常量，整批用断点事件扫描求和。可复现的 10000 票实验在 `tests/test_impact_scale.py`（多秤批、宽校正区间、不同步长与不同原读数），耗时写入 `run/impact_scale_metrics.json`。完整义务见 [数据契约](docs/contract.md)。
+
 ## 批量分配要点
 
 计划模式顶层恰为 `tariffs`、`shipments`、`dispatch_rules`；dispatch rule 至多 4 条，shipment 至多 12 件，候选 `services` 非空且不重复，每个 `(service, zone)` 必须同时存在费率与规则。围长超限只令该候选 `oversize`，不提前丢弃包裹。组容量按成员**计费重之和**与件数约束；非空组按 `B=max(S,minimum_base_cents)` 计最低收费，燃油在组层面只 half-up 取整一次，保险逐件求和。求解器对每条规则枚举全部容量可行子集并做备忘录搜索，穷举所有合法分配以保证全局最优；同价依次按更少非空组、包裹 ID Unicode 升序构造的 service 向量字典序最小决胜。无完整可行分配时 `feasible=false`、`total_cents=null`、退出码仍为 0；非法输入退出 2。算法、字段与可重算性的完整说明见 [数据契约](docs/contract.md)。
@@ -89,5 +103,5 @@ v6 是面向同一受众的报表序列离线评估器，提供独立控制台 `
 输入和输出不得相同，输出符号链接拒绝。单操作者批处理，不承诺并发发布或断电恢复。
 同输入重跑不累加，输入数组重排不改变规范化 `result`（SHA256 仍对应当次原始字节）。测试使用临时目录，运行产物在忽略的run/。
 
-src/parcel_rating/model.py 为业务模型门面（`analyze` 逐件计费、`plan` 批量分配、`temporal` 转发到时间线实现并复用同一套 v1 逐件规则、`reconcile` 转发到核销实现并以 v1 `analyze` 为只读应付基准），temporal.py 实现 v3 权威修订时间线，reconcile.py 实现 v4 外部账单闭合核销与身份支持证据，register.py 实现 v5 SQLite 预存款与交运清单登记簿（复用 v1 逐件报价生成冻结证据，货币以十进制文本持久化），register_cli.py 提供独立的 `parcel-register` 控制台，release.py 实现 v6 离线发布评估（JSON Lines 流式读取、SQLite 临时身份映射、划分精炼判定），release_cli.py 提供独立的 `parcel-rate-release` 控制台，common.py 提供受限JSON及报告发布，
-cli.py 衔接 v1..v4 数据链路（`--plan`/`--temporal`/`--reconcile` 两两互斥，schema_version 1/2/3/4；v5/v6 走独立脚本，schema_version 5/6）。fixtures 为明确自制样例，代码与样例采用MIT许可。
+src/parcel_rating/model.py 为业务模型门面（`analyze` 逐件计费、`plan` 批量分配、`temporal` 转发到时间线实现并复用同一套 v1 逐件规则、`reconcile` 转发到核销实现并以 v1 `analyze` 为只读应付基准、`impact` 转发到 v7 涨价敞口实现），temporal.py 实现 v3 权威修订时间线，reconcile.py 实现 v4 外部账单闭合核销与身份支持证据，register.py 实现 v5 SQLite 预存款与交运清单登记簿（复用 v1 逐件报价生成冻结证据，货币以十进制文本持久化），register_cli.py 提供独立的 `parcel-register` 控制台，release.py 实现 v6 离线发布评估（JSON Lines 流式读取、SQLite 临时身份映射、划分精炼判定），release_cli.py 提供独立的 `parcel-rate-release` 控制台，impact.py 实现 v7 承运费率涨价敞口与秤批复核（分段常量差价、断点事件扫描，绝不逐克枚举），common.py 提供受限JSON及报告发布，
+cli.py 衔接 v1..v4、v7 数据链路（`--plan`/`--temporal`/`--reconcile`/`--impact` 两两互斥，schema_version 1/2/3/4/7；v5/v6 走独立脚本，schema_version 5/6）。fixtures 为明确自制样例，代码与样例采用MIT许可。

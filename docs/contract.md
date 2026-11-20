@@ -1,6 +1,6 @@
 # Dimensional parcel rating
 
-The package has six entry points sharing the same strict JSON reader, source
+The package has seven entry points sharing the same strict JSON reader, source
 SHA256 provenance and atomic report publication:
 
 1. **Per-piece rating (schema_version 1)** — `analyze(data)` /
@@ -28,6 +28,13 @@ SHA256 provenance and atomic report publication:
    independent `parcel-rate-release` console script. Described in its own
    section below. It reads UTF-8 JSON Lines (not the single-JSON reader) and
    never changes the five older entry points.
+7. **Carrier-rate price impact (schema_version 7)** —
+   `parcel_rating.impact.evaluate(data)` /
+   `parcel_rating.model.impact(data)` /
+   `parcel-rating --impact --source FILE --output FILE`. Described in its own
+   section below. `--impact` is pairwise mutually exclusive with `--plan`,
+   `--temporal` and `--reconcile`; the six older entry points keep their
+   original contracts exactly.
 
 ## v1 per-piece rating
 
@@ -778,3 +785,143 @@ process peak RSS via the child's own `resource.getrusage` self-report (a
 forked child inherits the parent's maxrss, so an outside observer in a busy
 process would misread it) and records the metrics to
 `run/release_scale_metrics.json`.
+
+## v7 carrier-rate price impact and scale-batch review
+
+This entry point is a **read-only forecast**: it compares an old tariff table
+with a new one at the same corrected weight per shipment. It never changes a
+historical quote, never recomputes an accepted price with a later tariff, and
+never produces a debit or a credit. Its only output is the impact report.
+
+### Input contract
+
+The top level contains exactly `old_tariffs`, `new_tariffs`, `scale_batches`,
+`shipments` (no other field, none missing). All four arrays may be empty.
+
+- `old_tariffs` and `new_tariffs` each reuse the unchanged v1 tariff fields,
+  identifier rules, numeric bounds, per-table `(service, zone)` uniqueness and
+  at most 500 rows. In addition the pilot accepts only `step_grams >= 250`;
+  a smaller step fails the whole request for **either** table.
+- `shipments` has at most 10000 entries. Each has exactly the v1 shipment
+  fields `id`, `service`, `zone`, `weight_grams`, `length_mm`, `width_mm`,
+  `height_mm`, `declared_cents`, `remote` plus `scale_batch_id`. Every v1
+  field, identifier, numeric and boolean bound applies unchanged.
+  `weight_grams` is the **original scale reading**; dimensions, declared value
+  and the remote flag keep their v1 meaning. Shipment ids are globally unique
+  and `scale_batch_id` must reference a declared batch. Every shipment must
+  find the same `(service, zone)` row in **both** tariff tables; a key present
+  in only one table is an input error.
+- `scale_batches` is an array of batches, each with exactly
+  `scale_batch_id`, `min_delta_grams`, `max_delta_grams`, `references`:
+  - `scale_batch_id` follows the common identifier rules and is unique.
+  - `min_delta_grams` and `max_delta_grams` are integers in
+    `-20000..20000`; they may be equal and the lower bound may not exceed the
+    upper bound. Booleans are rejected.
+  - `references` holds 1..16 records, each exactly
+    `reference_id`, `reading_grams`, `true_min_grams`, `true_max_grams`.
+    `reference_id` is unique within its batch; the three weights lie in the v1
+    actual-weight range `1..10^9` and `true_min_grams <= true_max_grams`.
+    Boolean integers are rejected. Reference objects constrain the correction
+    only; they are never billed as tickets.
+
+Every declared batch must have at least one shipment, and every shipment must
+reference a declared batch. Unknown/missing fields, duplicate ids or keys,
+bad references, out-of-bound values and the 8 MB limit fail the whole request
+(CLI exit 2) **before** any business result is produced, even when a batch is
+contradictory.
+
+### One shared correction per batch
+
+Every ticket of a batch shares one integer correction `delta`; corrected
+weight is `weight_grams + delta`. The feasible set is the closed integer
+interval formed by intersecting, all together:
+
+- the declared batch interval `[min_delta_grams, max_delta_grams]`,
+- for every reference, `[true_min_grams - reading_grams,
+  true_max_grams - reading_grams]`, and
+- for every shipment of the batch — including tickets that are oversize on
+  either table — `[1 - weight_grams, 10^9 - weight_grams]`, so no corrected
+  weight leaves the v1 actual-weight range.
+
+An empty intersection is a **legal business conclusion**: the batch is marked
+`conflict`, and the report keeps the final computed `lower_delta_grams` and
+`upper_delta_grams` (possibly inverted) without dropping any reference or
+clipping an individual ticket's weight. Contradiction is decided only after the
+complete input has been validated.
+
+### Per-ticket comparison
+
+For every shipment, girth is judged independently against each table's
+`max_girth_mm` using the unchanged v1 per-piece rule. When both tables rate the
+ticket and the batch has a feasible interval, the difference at one `delta` is
+`new total_cents - old total_cents`, both computed with the **same** corrected
+weight and each table's own volume weight, step ceiling, remote fee, fuel and
+half-up insurance. Amounts are exact integer cents.
+
+If either table is `oversize`, only the two verdicts are kept: the ticket
+contributes to no difference and no exposure and is never treated as a zero
+quote. When the batch is contradictory both verdicts are still kept but every
+ticket's difference is unknown (`delta_cents: null`).
+
+### Aggregation and witnesses
+
+For each ticket, the report gives the minimum and maximum difference across the
+feasible interval and the **smallest** correction (numeric comparison) that
+attains each. For each feasible batch the same is reported for two sums over all
+comparable tickets at the *same* correction:
+
+- **net change** — signed sum of every ticket's difference;
+- **increase** (涨价敞口) — sum of only the positive differences.
+
+The two sums are recomputed independently at every candidate correction; the
+per-ticket extremes are never added together, and the net change is never
+clipped to nonnegative to form the increase. A feasible batch with no
+comparable ticket has both sums identically zero. Batch corrections are
+independent, so the portfolio extremes are the sums of each batch's respective
+lower (minimum) and upper (maximum) values. An empty input is a complete zero
+portfolio with both intervals `[0, 0]`. If any batch is contradictory the
+portfolio is `incomplete` with both sums `null`, while every other batch is
+still reported in full.
+
+### Result and report
+
+`parcel_rating.impact.evaluate(data)` returns the result directly and never
+mutates its argument; `parcel_rating.model.impact(data)` forwards to it. The
+CLI envelope is `{schema_version: 7, source_sha256, result}` with the SHA-256
+of the exact source bytes. `result` has exactly:
+
+- `shipments`, sorted by `id`, each exactly
+  `{id, scale_batch_id, old_status, new_status, delta_cents}` where statuses
+  are `rated`/`oversize` and `delta_cents` is
+  `{min_cents, max_cents, min_at_grams, max_at_grams}` or `null`;
+- `scale_batches`, sorted by `scale_batch_id`, each exactly
+  `{scale_batch_id, status, lower_delta_grams, upper_delta_grams,
+  net_change_cents, increase_cents}` where `status` is `feasible`/`conflict`
+  and both amount intervals use the same witness-bearing shape as
+  `delta_cents` (both `null` for a conflict);
+- `portfolio`: `{status, net_change_cents, increase_cents}` where `status` is
+  `complete`/`incomplete`; when complete each amount interval is only
+  `{min_cents, max_cents}`, otherwise both are `null`.
+
+On success the CLI publishes the report atomically and prints the identical
+parsed value. Malformed structure, duplicate keys, bad references, out-of-bound
+values, source/output path collisions, symlinked output and read/write
+failures exit 2 and preserve an existing report. A calibration contradiction
+is a normal report and exits 0. Reordering any input array (including each
+batch's `references`) never changes `result`.
+
+### Scale and determinism
+
+A tariff total is a step function of corrected weight whose step count changes
+only at `ceil(W / step_grams)` transitions; hence one ticket's difference is
+piecewise constant with at most `width/step_old + width/step_new + 1` pieces
+(`width <= 40000` from the declared +/-20000 range, `step_grams >= 250`).
+Batch totals are obtained by an **event sweep** over the union of those
+breakpoints, so runtime grows with
+`tickets x (breakpoints per ticket on the two tables)` — i.e. it depends on the
+declared interval width divided by the two step sizes, not on the raw weight
+magnitude — and memory is bounded by the number of distinct breakpoints. The
+implementation never enumerates grams and never materializes the
+ticket-by-correction Cartesian product; the reproducible 10000-shipment
+experiment is in `tests/test_impact_scale.py` and records its elapsed time to
+`run/impact_scale_metrics.json`.

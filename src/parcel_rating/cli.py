@@ -4,9 +4,13 @@ from pathlib import Path
 from .common import read, save
 from .model import analyze, plan, temporal, reconcile
 
-def run(source, planning, temporal_mode, reconcile_mode=False):
+def run(source, planning, temporal_mode, reconcile_mode=False, impact_mode=False):
     data,digest=read(source)
-    if reconcile_mode:
+    if impact_mode:
+        from .impact import evaluate as evaluate_impact
+        result=evaluate_impact(data)
+        schema=7
+    elif reconcile_mode:
         result=reconcile(data)
         schema=4
     elif temporal_mode:
@@ -26,13 +30,14 @@ def main():
     mode.add_argument('--plan',action='store_true',help='batch dispatch allocation mode (schema_version 2)')
     mode.add_argument('--temporal',action='store_true',help='authoritative revision timeline and point-in-time rating (schema_version 3)')
     mode.add_argument('--reconcile',action='store_true',help='external bill closure reconciliation with identity support evidence (schema_version 4)')
+    mode.add_argument('--impact',action='store_true',help='carrier-rate price-impact and scale-batch review (schema_version 7)')
     parser.add_argument('--source',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
     report=None
     try:
         if args.source.resolve()==args.output.resolve():raise ValueError('input and output must differ')
-        report=run(args.source,args.plan,args.temporal,args.reconcile);save(args.output,report)
+        report=run(args.source,args.plan,args.temporal,args.reconcile,args.impact);save(args.output,report)
     except (ValueError,TypeError,KeyError,OSError,OverflowError,RecursionError) as error:
         print(str(error),file=sys.stderr);return 2
     print(json.dumps(report,sort_keys=True,ensure_ascii=False,allow_nan=False));return 0

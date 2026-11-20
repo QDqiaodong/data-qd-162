@@ -1,0 +1,24 @@
+{
+  "old_tariffs": [
+    {"service": "ground", "zone": "Z2", "base_cents": 250, "step_grams": 500, "per_step_cents": 40, "divisor_cm3_per_kg": 5000, "max_girth_mm": 3000, "remote_cents": 125, "fuel_bp": 850, "insurance_bp": 100, "insurance_free_cents": 50000}
+  ],
+  "new_tariffs": [
+    {"service": "ground", "zone": "Z2", "base_cents": 300, "step_grams": 500, "per_step_cents": 50, "divisor_cm3_per_kg": 4500, "max_girth_mm": 2800, "remote_cents": 150, "fuel_bp": 900, "insurance_bp": 120, "insurance_free_cents": 50000}
+  ],
+  "scale_batches": [
+    {"scale_batch_id": "SB-A", "min_delta_grams": -10, "max_delta_grams": 10,
+     "references": [
+       {"reference_id": "A-1", "reading_grams": 500, "true_min_grams": 495, "true_max_grams": 508},
+       {"reference_id": "A-2", "reading_grams": 2000, "true_min_grams": 1998, "true_max_grams": 2005}
+     ]},
+    {"scale_batch_id": "SB-B", "min_delta_grams": -5, "max_delta_grams": 20,
+     "references": [
+       {"reference_id": "B-1", "reading_grams": 1000, "true_min_grams": 1003, "true_max_grams": 1006}
+     ]}
+  ],
+  "shipments": [
+    {"id": "P-1", "service": "ground", "zone": "Z2", "weight_grams": 900, "length_mm": 400, "width_mm": 300, "height_mm": 200, "declared_cents": 100000, "remote": true, "scale_batch_id": "SB-A"},
+    {"id": "P-2", "service": "ground", "zone": "Z2", "weight_grams": 1200, "length_mm": 100, "width_mm": 100, "height_mm": 100, "declared_cents": 10000, "remote": false, "scale_batch_id": "SB-A"},
+    {"id": "P-3", "service": "ground", "zone": "Z2", "weight_grams": 2500, "length_mm": 300, "width_mm": 200, "height_mm": 150, "declared_cents": 20000, "remote": false, "scale_batch_id": "SB-B"}
+  ]
+}
